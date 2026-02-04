@@ -1,7 +1,11 @@
 import os
 import json
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,106 +17,147 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# --------- START ---------
+# ---- СТАНИ ----
+STATE_NONE = 0
+STATE_URL = 1
+STATE_METHOD = 2
+STATE_AUTH = 3
+STATE_BODY = 4
+
+user_state = {}
+user_data = {}
+
+# ---- /start ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🔓 Без авторизації", callback_data="no_auth")],
-        [InlineKeyboardButton("🔐 З авторизацією", callback_data="with_auth")]
-    ]
+    user_state[update.effective_user.id] = STATE_URL
+    user_data[update.effective_user.id] = {}
+
     await update.message.reply_text(
-        "Обери тип запиту:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "👋 Надішли URL для HTTP-запиту"
     )
 
-# --------- AUTH CHOICE ---------
-async def auth_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+# ---- ОБРОБКА ТЕКСТУ ----
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text
 
-    context.user_data["auth"] = query.data
+    state = user_state.get(uid, STATE_NONE)
 
-    keyboard = [
-        [InlineKeyboardButton("GET", callback_data="GET")],
-        [InlineKeyboardButton("POST", callback_data="POST")]
-    ]
-    await query.edit_message_text(
-        "Обери метод:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # URL
+    if state == STATE_URL:
+        user_data[uid]["url"] = text
+        user_state[uid] = STATE_METHOD
 
-# --------- METHOD CHOICE ---------
-async def method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+        keyboard = [
+            [
+                InlineKeyboardButton("GET", callback_data="METHOD_GET"),
+                InlineKeyboardButton("POST", callback_data="METHOD_POST"),
+            ]
+        ]
+        await update.message.reply_text(
+            "Обери метод:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
-    context.user_data["method"] = query.data
-    await query.edit_message_text("Надішли URL:")
-
-# --------- HANDLE MESSAGE ---------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if "url" not in context.user_data:
-        context.user_data["url"] = text
-        if context.user_data["method"] == "POST":
-            await update.message.reply_text("Надішли JSON тіло:")
-        else:
-            await execute_request(update, context)
-    else:
-        context.user_data["body"] = text
-        await execute_request(update, context)
-
-# --------- EXECUTE REQUEST ---------
-async def execute_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    method = context.user_data["method"]
-    url = context.user_data["url"]
-    auth = context.user_data["auth"]
-
-    headers = {"Content-Type": "application/json"}
-
-    if auth == "with_auth":
-        token = context.user_data.get("token")
-        if not token:
-            await update.message.reply_text("Надішли токен:")
-            context.user_data["awaiting_token"] = True
+    # BODY
+    elif state == STATE_BODY:
+        try:
+            body = json.loads(text)
+            user_data[uid]["body"] = body
+        except Exception:
+            await update.message.reply_text(
+                "❌ Невалідний JSON.\n"
+                "Спробуй ще раз або напиши /start"
+            )
             return
-        headers["Authorization"] = f"Bearer {token}"
+
+        await perform_request(update, context, uid)
+
+# ---- КНОПКИ ----
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    uid = query.from_user.id
+    data = query.data
+
+    # METHOD
+    if data.startswith("METHOD_"):
+        method = data.replace("METHOD_", "")
+        user_data[uid]["method"] = method
+
+        user_state[uid] = STATE_AUTH
+        keyboard = [
+            [
+                InlineKeyboardButton("🔐 З токеном", callback_data="AUTH_YES"),
+                InlineKeyboardButton("🔓 Без токена", callback_data="AUTH_NO"),
+            ]
+        ]
+        await query.edit_message_text(
+            "Авторизація:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    # AUTH
+    elif data == "AUTH_YES":
+        user_data[uid]["auth"] = True
+        user_state[uid] = STATE_BODY
+        await query.edit_message_text(
+            "Надішли JSON body:"
+        )
+
+    elif data == "AUTH_NO":
+        user_data[uid]["auth"] = False
+        user_data[uid]["body"] = None
+        await perform_request(query, context, uid)
+
+# ---- HTTP ----
+async def perform_request(source, context, uid):
+    data = user_data[uid]
+
+    headers = {}
+    if data.get("auth"):
+        headers["Authorization"] = "Bearer YOUR_TOKEN_HERE"
 
     try:
-        if method == "GET":
-            r = requests.get(url, headers=headers, timeout=20)
+        if data["method"] == "GET":
+            r = requests.get(data["url"], headers=headers, timeout=15)
         else:
-            body = context.user_data.get("body", "{}")
-            data = json.loads(body)
-            r = requests.post(url, headers=headers, json=data, timeout=20)
+            r = requests.post(
+                data["url"],
+                headers=headers,
+                json=data.get("body"),
+                timeout=15,
+            )
 
-        await update.message.reply_text(
-            f"✅ Status: {r.status_code}\n\n{r.text[:3500]}"
+        text = (
+            f"✅ Status: {r.status_code}\n\n"
+            f"{r.text[:3500]}"
         )
-    except json.JSONDecodeError:
-        await update.message.reply_text("❌ Невалідний JSON. Спробуй ще раз.")
+
     except Exception as e:
-        await update.message.reply_text(f"❌ Помилка: {e}")
+        text = f"❌ Помилка:\n{e}"
 
-    context.user_data.clear()
-    await update.message.reply_text("🔁 Можеш виконати новий запит /start")
+    user_state[uid] = STATE_URL
+    user_data[uid] = {}
 
-# --------- TOKEN INPUT ---------
-async def token_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.user_data.get("awaiting_token"):
-        context.user_data["token"] = update.message.text.strip()
-        context.user_data.pop("awaiting_token")
-        await execute_request(update, context)
+    if hasattr(source, "edit_message_text"):
+        await source.edit_message_text(text)
+    else:
+        await source.message.reply_text(text)
 
-# --------- MAIN ---------
+    await context.bot.send_message(
+        chat_id=uid,
+        text="🔁 Можеш надсилати новий URL або /start",
+    )
+
+# ---- MAIN ----
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(auth_choice, pattern="^(no_auth|with_auth)$"))
-    app.add_handler(CallbackQueryHandler(method_choice, pattern="^(GET|POST)$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, token_input))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     app.run_polling()
 
