@@ -1,210 +1,119 @@
 import os
 import json
 import requests
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-# =====================
-# CONFIG
-# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
 
-# =====================
-# USER STATE (simple FSM)
-# =====================
-STATE = {}
-
-STEP_AUTH = "auth"
-STEP_TOKEN = "token"
-STEP_METHOD = "method"
-STEP_URL = "url"
-STEP_JSON = "json"
-
-# =====================
-# MENUS
-# =====================
-def menu_auth():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔓 Без авторизації", callback_data="auth_no")],
-        [InlineKeyboardButton("🔐 З авторизацією", callback_data="auth_yes")],
-    ])
-
-def menu_method():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("GET", callback_data="method_get")],
-        [InlineKeyboardButton("POST", callback_data="method_post")],
-    ])
-
-def menu_again():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔁 Новий запит", callback_data="restart")]
-    ])
-
-# =====================
-# START
-# =====================
+# --------- START ---------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    STATE[uid] = {"step": STEP_AUTH}
-
+    keyboard = [
+        [InlineKeyboardButton("🔓 Без авторизації", callback_data="no_auth")],
+        [InlineKeyboardButton("🔐 З авторизацією", callback_data="with_auth")]
+    ]
     await update.message.reply_text(
-        "🐒 HTTP Monkey\n\n"
-        "Обери режим запиту:",
-        reply_markup=menu_auth()
+        "Обери тип запиту:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# =====================
-# CALLBACKS
-# =====================
-async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --------- AUTH CHOICE ---------
+async def auth_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id
-    data = query.data
 
-    if data == "restart":
-        STATE[uid] = {"step": STEP_AUTH}
-        await query.message.reply_text(
-            "🔄 Почнемо знову\nОбери режим:",
-            reply_markup=menu_auth()
-        )
-        return
+    context.user_data["auth"] = query.data
 
-    if data.startswith("auth_"):
-        STATE[uid]["auth"] = (data == "auth_yes")
+    keyboard = [
+        [InlineKeyboardButton("GET", callback_data="GET")],
+        [InlineKeyboardButton("POST", callback_data="POST")]
+    ]
+    await query.edit_message_text(
+        "Обери метод:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-        if STATE[uid]["auth"]:
-            STATE[uid]["step"] = STEP_TOKEN
-            await query.message.reply_text(
-                "🔐 Введи токен авторизації\n"
-                "(буде використано як Bearer token)"
-            )
-        else:
-            STATE[uid]["step"] = STEP_METHOD
-            await query.message.reply_text(
-                "Обери HTTP метод:",
-                reply_markup=menu_method()
-            )
-        return
+# --------- METHOD CHOICE ---------
+async def method_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    if data.startswith("method_"):
-        STATE[uid]["method"] = data.replace("method_", "").upper()
-        STATE[uid]["step"] = STEP_URL
+    context.user_data["method"] = query.data
+    await query.edit_message_text("Надішли URL:")
 
-        await query.message.reply_text("🌐 Надішли URL:")
-        return
-
-# =====================
-# TEXT HANDLER
-# =====================
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+# --------- HANDLE MESSAGE ---------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    state = STATE.get(uid)
 
-    if not state:
-        await update.message.reply_text("Натисни /start")
-        return
-
-    # TOKEN
-    if state["step"] == STEP_TOKEN:
-        state["token"] = text
-        state["step"] = STEP_METHOD
-        await update.message.reply_text(
-            "Обери HTTP метод:",
-            reply_markup=menu_method()
-        )
-        return
-
-    # URL
-    if state["step"] == STEP_URL:
-        state["url"] = text
-
-        if state["method"] == "POST":
-            state["step"] = STEP_JSON
-            await update.message.reply_text(
-                "📦 Надішли JSON body\n"
-                "(можна з відступами)"
-            )
+    if "url" not in context.user_data:
+        context.user_data["url"] = text
+        if context.user_data["method"] == "POST":
+            await update.message.reply_text("Надішли JSON тіло:")
         else:
-            await execute_request(update, uid)
-        return
+            await execute_request(update, context)
+    else:
+        context.user_data["body"] = text
+        await execute_request(update, context)
 
-    # JSON
-    if state["step"] == STEP_JSON:
-        try:
-            state["json"] = json.loads(text)
-        except json.JSONDecodeError as e:
-            await update.message.reply_text(
-                f"❌ Невалідний JSON:\n`{e}`",
-                parse_mode="Markdown",
-                reply_markup=menu_again()
-            )
+# --------- EXECUTE REQUEST ---------
+async def execute_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    method = context.user_data["method"]
+    url = context.user_data["url"]
+    auth = context.user_data["auth"]
+
+    headers = {"Content-Type": "application/json"}
+
+    if auth == "with_auth":
+        token = context.user_data.get("token")
+        if not token:
+            await update.message.reply_text("Надішли токен:")
+            context.user_data["awaiting_token"] = True
             return
-
-        await execute_request(update, uid)
-        return
-
-# =====================
-# EXECUTE REQUEST
-# =====================
-async def execute_request(update: Update, uid: int):
-    state = STATE[uid]
-
-    headers = {}
-    if state.get("auth"):
-        headers["Authorization"] = f"Bearer {state.get('token')}"
+        headers["Authorization"] = f"Bearer {token}"
 
     try:
-        if state["method"] == "GET":
-            r = requests.get(state["url"], headers=headers, timeout=15)
+        if method == "GET":
+            r = requests.get(url, headers=headers, timeout=20)
         else:
-            r = requests.post(
-                state["url"],
-                headers={**headers, "Content-Type": "application/json"},
-                json=state.get("json"),
-                timeout=15
-            )
-
-        body = r.text[:4000]
+            body = context.user_data.get("body", "{}")
+            data = json.loads(body)
+            r = requests.post(url, headers=headers, json=data, timeout=20)
 
         await update.message.reply_text(
-            f"✅ Status: {r.status_code}\n\n{body}",
-            reply_markup=menu_again()
+            f"✅ Status: {r.status_code}\n\n{r.text[:3500]}"
         )
-
+    except json.JSONDecodeError:
+        await update.message.reply_text("❌ Невалідний JSON. Спробуй ще раз.")
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ Помилка запиту:\n{e}",
-            reply_markup=menu_again()
-        )
+        await update.message.reply_text(f"❌ Помилка: {e}")
 
-    STATE[uid]["step"] = None
+    context.user_data.clear()
+    await update.message.reply_text("🔁 Можеш виконати новий запит /start")
 
-# =====================
-# MAIN
-# =====================
+# --------- TOKEN INPUT ---------
+async def token_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_token"):
+        context.user_data["token"] = update.message.text.strip()
+        context.user_data.pop("awaiting_token")
+        await execute_request(update, context)
+
+# --------- MAIN ---------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callbacks))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
+    app.add_handler(CallbackQueryHandler(auth_choice, pattern="^(no_auth|with_auth)$"))
+    app.add_handler(CallbackQueryHandler(method_choice, pattern="^(GET|POST)$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, token_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 Bot started")
     app.run_polling()
 
 if __name__ == "__main__":
