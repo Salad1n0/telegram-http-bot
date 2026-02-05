@@ -102,13 +102,13 @@ def telegram_webhook():
 
         if action == "METHOD_GET":
             user_data[chat_id]["method"] = "GET"
-            edit_message(chat_id, message_id, "Авторизація?", auth_menu())
             user_state[chat_id] = STATE_AUTH
+            edit_message(chat_id, message_id, "Авторизація?", auth_menu())
 
         elif action == "METHOD_POST":
             user_data[chat_id]["method"] = "POST"
-            edit_message(chat_id, message_id, "Авторизація?", auth_menu())
             user_state[chat_id] = STATE_AUTH
+            edit_message(chat_id, message_id, "Авторизація?", auth_menu())
 
         elif action == "AUTH_YES":
             user_state[chat_id] = STATE_TOKEN
@@ -125,7 +125,7 @@ def telegram_webhook():
         elif action == "RESTART":
             user_state[chat_id] = STATE_URL
             user_data[chat_id] = {}
-            edit_message(chat_id, message_id, "Надішли URL")
+            send_message(chat_id, "🌐 Надішли URL")
 
         return "ok"
 
@@ -197,15 +197,19 @@ def perform_request(chat_id):
                 timeout=15
             )
 
-        text = (
+        result_text = (
             f"✅ Status: {r.status_code}\n\n"
             f"{r.text[:3500]}"
         )
 
     except Exception as e:
-        text = f"❌ Помилка:\n{str(e)}"
+        result_text = f"❌ Помилка:\n{str(e)}"
 
-    send_message(chat_id, text, again_menu())
+    # 1️⃣ РЕЗУЛЬТАТ — ОКРЕМЕ ПОВІДОМЛЕННЯ
+    send_message(chat_id, result_text)
+
+    # 2️⃣ КНОПКА — ОКРЕМЕ ПОВІДОМЛЕННЯ
+    send_message(chat_id, "Що робимо далі?", again_menu())
 
     user_state[chat_id] = None
     user_data[chat_id] = {}
