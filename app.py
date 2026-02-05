@@ -36,6 +36,10 @@ def send_message(chat_id, text, keyboard=None):
     )
 
 
+def send_wakeup(chat_id):
+    send_message(chat_id, "🐒 Прокидаюсь… секунду ⏳")
+
+
 def edit_message(chat_id, message_id, text, keyboard=None):
     payload = {
         "chat_id": chat_id,
@@ -141,6 +145,10 @@ def telegram_webhook():
     if text == "/start":
         user_state[chat_id] = STATE_URL
         user_data[chat_id] = {}
+
+        # 💤 UX: cold start
+        send_wakeup(chat_id)
+
         send_message(chat_id, "👋 Надішли URL")
         return "ok"
 
@@ -205,10 +213,10 @@ def perform_request(chat_id):
     except Exception as e:
         result_text = f"❌ Помилка:\n{str(e)}"
 
-    # 1️⃣ РЕЗУЛЬТАТ — ОКРЕМЕ ПОВІДОМЛЕННЯ
+    # 1️⃣ РЕЗУЛЬТАТ — окреме повідомлення
     send_message(chat_id, result_text)
 
-    # 2️⃣ КНОПКА — ОКРЕМЕ ПОВІДОМЛЕННЯ
+    # 2️⃣ КНОПКА — окреме повідомлення
     send_message(chat_id, "Що робимо далі?", again_menu())
 
     user_state[chat_id] = None
